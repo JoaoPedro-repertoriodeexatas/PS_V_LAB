@@ -1,0 +1,22 @@
+[
+  {
+    "ticket_id": "TKT-101",
+    "title": "Falha ao exportar relatório mensal de vendas em CSV",
+    "description": "Ao tentar exportar o relatório consolidado de vendas dos últimos 90 dias no painel financeiro, a tela carrega por cerca de 40 segundos e exibe a mensagem genérica 'Não foi possível gerar o arquivo. Tente novamente'. Relatórios de apenas 7 dias funcionam normalmente. O problema começou após o fechamento de mês ontem à noite."
+  },
+  {
+    "ticket_id": "TKT-102",
+    "title": "Erro 504 Gateway Timeout no webhook de confirmação de pagamentos",
+    "description": "Nosso endpoint de webhook (/api/v2/webhooks/payments) começou a receber respostas HTTP 504 intermitentes durante picos de checkout entre 18h e 21h. Os pedidos ficam presos com status 'aguardando pagamento' mesmo após a aprovação no gateway. Nos logs da nossa aplicação, o processamento síncrono do payload está levando entre 28s e 35s antes de retornar 200 OK."
+  },
+  {
+    "ticket_id": "TKT-103",
+    "title": "Erro de autenticação e permissão na sincronização de estoque com ERP",
+    "description": "A integração automática de estoque entre o ERP e a loja virtual parou de atualizar o saldo de produtos desde hoje às 08h. O log do conector registra falhas HTTP 403 Forbidden no endpoint /v1/inventory/sync. A equipe trocou a chave de API ontem à tarde por política de rotação de credenciais, mas afirma ter atualizado o token no painel do ERP."
+  },
+  {
+    "ticket_id": "TKT-104",
+    "title": "Lentidão extrema e travamento intermitente no sistema de caixa (PDV)",
+    "description": "Os dois terminais de frente de caixa da loja física estão travando por 15 a 20 segundos toda vez que o operador bipa um produto ou tenta finalizar uma venda no cartão. Em alguns momentos o aplicativo fecha sozinho sem salvar o cupom. O problema ocorre principalmente no horário de almoço, quando a rede Wi-Fi da loja também fica instável."
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "customer_id": "cust_001",
+    "name": "Mariana Silva",
+    "technical_level": "leigo",
+    "communication_style": "didático",
+    "channel": "chat"
+  },
+  {
+    "customer_id": "cust_002",
+    "name": "Carlos Eduardo Mendes",
+    "technical_level": "intermediário",
+    "communication_style": "detalhado",
+    "channel": "e-mail"
+  },
+  {
+    "customer_id": "cust_003",
+    "name": "Rafael Oliveira",
+    "technical_level": "avançado",
+    "communication_style": "direto",
+    "channel": "chat"
+  },
+  {
+    "customer_id": "cust_004",
+    "name": "Fernanda Costa",
+    "technical_level": "leigo",
+    "communication_style": "direto",
+    "channel": "telefone"
+  }
+]

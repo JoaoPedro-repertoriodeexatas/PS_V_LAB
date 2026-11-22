@@ -1,0 +1,14 @@
+# Ambientes virtuais
+.venv/
+venv/
+
+# Caches e artefatos Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Segredos e variáveis de ambiente locais
+.env
+
+# Histórico local de execuções (exemplos versionáveis ficam em /samples)
+data/history.json
