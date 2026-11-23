@@ -556,6 +556,7 @@ def build_ticket_analytics_rows(
                 "provider": rec.provider,
                 "model": rec.model,
                 "temperature": rec.temperature,
+                "latency_ms": rec.latency_ms,
                 "is_evaluated": is_evaluated,
                 "clarity_score": clarity_score,
                 "customer_fit_score": customer_fit_score,
@@ -623,6 +624,7 @@ def _export_analytics_csv(rows: list[dict[str, Any]]) -> str:
         "provider",
         "model",
         "temperature",
+        "latency_ms",
         "is_evaluated",
         "clarity_score",
         "customer_fit_score",
@@ -715,30 +717,52 @@ def _render_status_banner(st: Any, result: PipelineExecutionResult) -> None:
     model_str = html.escape(f"{record.provider}/{record.model}")
 
     if result.from_cache:
+        if record.latency_ms is not None and record.latency_ms > 0:
+            savings_pct = max(
+                0.0,
+                (1.0 - (result.elapsed_ms / record.latency_ms)) * 100.0,
+            )
+            detail_html = (
+                f"<span>API original: <code>{record.latency_ms:.2f} ms</code> · "
+                f"economia de <strong>~{savings_pct:.1f}%</strong> · "
+                f"reutilizado de <code>{path_str}</code>.</span>"
+            )
+        else:
+            detail_html = (
+                f"<span>Resposta reutilizada de <code>{path_str}</code> "
+                "sem nova chamada à API.</span>"
+            )
         st.markdown(
             (
                 '<div class="status-banner status-banner-cache">'
-                '<span class="badge-pill badge-cache-hit">CACHE HIT</span>'
-                f'<span>Resposta reutilizada de <code>{path_str}</code> sem nova chamada à API.</span>'
+                f'<span class="badge-pill badge-cache-hit">⚡ CACHE HIT · {result.elapsed_ms:.2f} ms</span>'
+                f"{detail_html}"
                 "</div>"
             ),
             unsafe_allow_html=True,
         )
     else:
+        api_ms = record.latency_ms if record.latency_ms is not None else result.elapsed_ms
         st.markdown(
             (
                 '<div class="status-banner status-banner-api">'
-                '<span class="badge-pill badge-api-new">NOVA EXECUÇÃO API</span>'
-                f'<span>Gerado via <code>{model_str}</code> e salvo em <code>{path_str}</code>.</span>'
+                f'<span class="badge-pill badge-api-new">✨ NOVA EXECUÇÃO API · {api_ms:.2f} ms</span>'
+                f"<span>Gerado via <code>{model_str}</code> e salvo em <code>{path_str}</code>.</span>"
                 "</div>"
             ),
             unsafe_allow_html=True,
         )
 
+    latency_meta = (
+        f"{record.latency_ms:.2f} ms"
+        if record.latency_ms is not None
+        else "— (registro legado)"
+    )
     meta_line = (
         f"versão={html.escape(record.prompt_version)} | "
         f"tipo={html.escape(record.content_type)} | "
         f"temp={record.temperature} | "
+        f"latência_api={html.escape(latency_meta)} | "
         f"utc={html.escape(record.timestamp)}<br/>"
         f"cache_key={html.escape(record.cache_key)}"
     )
@@ -1473,9 +1497,15 @@ def _render_ticket_dashboard(
                 sel_row["channel"],
             )
 
+            latency_display = (
+                f"{sel_rec.latency_ms:.2f} ms"
+                if sel_rec.latency_ms is not None
+                else "— (registro legado)"
+            )
             meta_html = (
                 f"modelo={html.escape(sel_rec.provider)}/{html.escape(sel_rec.model)} | "
                 f"temp={sel_rec.temperature} | "
+                f"latência={html.escape(latency_display)} | "
                 f"utc={html.escape(sel_rec.timestamp)}<br/>"
                 f"cache_key={html.escape(sel_rec.cache_key)}"
             )
@@ -1677,6 +1707,7 @@ def render_app() -> None:
                             record=updated_record,
                             from_cache=gen_result.from_cache,
                             storage_path=gen_result.storage_path,
+                            elapsed_ms=gen_result.elapsed_ms,
                         ),
                         gen_prompt,
                     )
@@ -1770,6 +1801,7 @@ def render_app() -> None:
                                 record=updated_record,
                                 from_cache=res_v1.from_cache,
                                 storage_path=res_v1.storage_path,
+                                elapsed_ms=res_v1.elapsed_ms,
                             ),
                             prompt_v1,
                         )
@@ -1803,6 +1835,7 @@ def render_app() -> None:
                                 record=updated_record,
                                 from_cache=res_v2.from_cache,
                                 storage_path=res_v2.storage_path,
+                                elapsed_ms=res_v2.elapsed_ms,
                             ),
                             prompt_v2,
                         )

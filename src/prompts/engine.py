@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from typing import get_args
 
 from src.models import ContentType, CustomerProfile
 from src.prompts.versions import get_version_module
 
 VALID_CONTENT_TYPES: tuple[str, ...] = get_args(ContentType)
+
+_TICKET_TAG_PATTERN = re.compile(r"<\s*/?\s*ticket(?:\b[^>]*)?>", re.IGNORECASE)
 
 NO_RAW_COT_RULE = (
     "RESTRIÇÃO CRÍTICA DE RACIOCÍNIO: NÃO exiba raciocínio interno bruto, "
@@ -30,7 +33,16 @@ def _validate_ticket(ticket: str) -> str:
     return cleaned
 
 
+def sanitize_ticket_text(ticket: str) -> str:
+    """Neutraliza tags <ticket> / </ticket> embutidas no relato para evitar XML breakout."""
+    return _TICKET_TAG_PATTERN.sub(
+        lambda match: match.group(0).replace("<", "&lt;").replace(">", "&gt;"),
+        ticket,
+    )
+
+
 def _format_context_block(profile: CustomerProfile, ticket: str) -> str:
+    safe_ticket = sanitize_ticket_text(ticket)
     return (
         "Perfil do cliente:\n"
         f"- ID: {profile.customer_id}\n"
@@ -40,7 +52,7 @@ def _format_context_block(profile: CustomerProfile, ticket: str) -> str:
         f"- Canal de atendimento: {profile.channel}\n\n"
         "Relato do ticket:\n"
         "<ticket>\n"
-        f"{ticket}\n"
+        f"{safe_ticket}\n"
         "</ticket>"
     )
 

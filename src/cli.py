@@ -329,6 +329,17 @@ def _render_execution_result(
         "Provedor / Modelo:",
         f"{record.provider} / {record.model} (temperature={record.temperature})",
     )
+    if result.from_cache:
+        if record.latency_ms is not None:
+            latency_label = (
+                f"{result.elapsed_ms:.2f} ms (API original: {record.latency_ms:.2f} ms)"
+            )
+        else:
+            latency_label = f"{result.elapsed_ms:.2f} ms (registro legado)"
+    else:
+        latency_label = f"{result.elapsed_ms:.2f} ms"
+
+    meta_table.add_row("Latência:", latency_label)
     meta_table.add_row("Timestamp (UTC):", record.timestamp)
     meta_table.add_row("Cache Key:", record.cache_key)
     meta_table.add_row("Arquivo Salvo:", str(result.storage_path))

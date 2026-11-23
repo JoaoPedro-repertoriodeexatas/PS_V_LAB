@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 TechnicalLevel = Literal["leigo", "intermediário", "avançado"]
 CommunicationStyle = Literal["direto", "detalhado", "didático"]
@@ -81,7 +81,19 @@ class ExecutionRecord(BaseModel):
     model: str = Field(..., min_length=1, description="Identificador do modelo utilizado.")
     temperature: float = Field(..., ge=0.0, le=2.0, description="Temperatura configurada na chamada ao LLM.")
     output: dict[str, Any] | str = Field(..., description="Saída estruturada ou textual gerada pelo modelo.")
+    latency_ms: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Tempo de geração da resposta via API em milissegundos.",
+    )
     evaluation: RubricEvaluation | None = Field(
         default=None,
         description="Avaliação opcional baseada na rubrica fixa de 3 critérios.",
     )
+
+    @field_validator("latency_ms", mode="after")
+    @classmethod
+    def _round_latency_ms(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(float(value), 2)

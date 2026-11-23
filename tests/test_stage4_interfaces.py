@@ -443,7 +443,7 @@ def test_build_ticket_analytics_rows_and_fallback() -> None:
     long_ticket = "[TKT-101] " + ("Descrição longa de teste " * 5)
 
     rec_evaluated = _make_record("k_eval", "v2", "diagnosis", scores=(4, 5, 5)).model_copy(
-        update={"customer_id": "cust_001", "ticket": long_ticket}
+        update={"customer_id": "cust_001", "ticket": long_ticket, "latency_ms": 1420.5}
     )
     rec_unevaluated = _make_record("k_uneval", "v1", "resolution", scores=None).model_copy(
         update={"customer_id": "cust_antigo_999", "ticket": "Relato livre sem código"}
@@ -463,6 +463,7 @@ def test_build_ticket_analytics_rows_and_fallback() -> None:
     assert row_eval["technical_level"] == "leigo"
     assert row_eval["communication_style"] == "didático"
     assert row_eval["channel"] == "chat"
+    assert row_eval["latency_ms"] == 1420.5
     assert row_eval["is_evaluated"] is True
     assert row_eval["clarity_score"] == 4
     assert row_eval["customer_fit_score"] == 5
@@ -475,9 +476,14 @@ def test_build_ticket_analytics_rows_and_fallback() -> None:
     assert row_unknown["technical_level"] == "desconhecido"
     assert row_unknown["communication_style"] == "desconhecido"
     assert row_unknown["channel"] == "desconhecido"
+    assert row_unknown["latency_ms"] is None
     assert row_unknown["is_evaluated"] is False
     assert row_unknown["clarity_score"] is None
     assert row_unknown["total_score"] is None
+
+    csv_text = web_app_module._export_analytics_csv(rows)
+    assert "latency_ms" in csv_text.splitlines()[0]
+    assert "1420.5" in csv_text
 
 
 def test_summarize_by_ticket_grouping_and_averages() -> None:

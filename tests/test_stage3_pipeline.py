@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.models import CustomerProfile  # noqa: E402
+from src.models import CustomerProfile, ExecutionRecord  # noqa: E402
 from src.pipeline import (  # noqa: E402
     build_rubric_evaluation,
     evaluate_execution,
@@ -261,6 +263,85 @@ def test_gemini_client_rejects_missing_or_placeholder_api_key(
         GeminiClient(load_env=False)
 
 
+def test_execution_record_legacy_json_without_latency_ms() -> None:
+    """Confirma retrocompatibilidade: JSON legado sem latency_ms desserializa com None."""
+    legacy_payload = {
+        "timestamp": "2026-11-22T20:00:00+00:00",
+        "cache_key": "legacy-key-001",
+        "customer_id": "cust_001",
+        "ticket": SAMPLE_TICKET,
+        "prompt_version": "v2",
+        "content_type": "diagnosis",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.2,
+        "output": "Resposta gerada antes da telemetria de latência.",
+        "evaluation": None,
+    }
+    record = ExecutionRecord.model_validate(legacy_payload)
+    assert record.latency_ms is None
+    dumped = record.model_dump(mode="json")
+    assert dumped["latency_ms"] is None
+
+
+def test_pipeline_latency_telemetry_api_and_cache_hit(tmp_path: Path) -> None:
+    """Valida medição de latency_ms na API e preservação do valor original no Cache Hit."""
+
+    class SlowFakeLLMClient(FakeLLMClient):
+        def generate(self, prompt: str) -> str:
+            time.sleep(0.015)
+            return super().generate(prompt)
+
+    history_file = tmp_path / "latency_history.json"
+    storage = JsonHistoryStorage(history_file)
+    slow_llm = SlowFakeLLMClient()
+
+    expected_cache_key = generate_cache_key(
+        customer_id=SAMPLE_PROFILE.customer_id,
+        ticket=SAMPLE_TICKET,
+        content_type="diagnosis",
+        prompt_version="v2",
+        provider=slow_llm.provider,
+        model=slow_llm.model,
+        temperature=slow_llm.temperature,
+    )
+
+    api_result = execute_pipeline(
+        profile=SAMPLE_PROFILE,
+        ticket=SAMPLE_TICKET,
+        content_type="diagnosis",
+        prompt_version="v2",
+        llm_client=slow_llm,
+        storage=storage,
+    )
+    assert api_result.from_cache is False
+    assert api_result.record.cache_key == expected_cache_key
+    assert api_result.record.latency_ms is not None
+    assert api_result.record.latency_ms >= 0.0
+    assert api_result.elapsed_ms == api_result.record.latency_ms
+
+    original_api_latency = api_result.record.latency_ms
+
+    cache_result = execute_pipeline(
+        profile=SAMPLE_PROFILE,
+        ticket=SAMPLE_TICKET,
+        content_type="diagnosis",
+        prompt_version="v2",
+        llm_client=slow_llm,
+        storage=storage,
+    )
+    assert cache_result.from_cache is True
+    assert slow_llm.call_count == 1
+    assert cache_result.record.cache_key == expected_cache_key
+    assert cache_result.record.latency_ms == original_api_latency
+    assert cache_result.elapsed_ms >= 0.0
+
+    # Confirma que o arquivo JSON em disco manteve latency_ms original sem sobrescrita
+    raw_saved = json.loads(history_file.read_text(encoding="utf-8"))
+    assert len(raw_saved) == 1
+    assert raw_saved[0]["latency_ms"] == original_api_latency
+
+
 def _run_standalone() -> int:
     """Executa a suíte da Etapa 3 offline e exibe painel de checkpoint com rich."""
     from rich.console import Console
@@ -295,6 +376,16 @@ def _run_standalone() -> int:
                     "Validação defensiva de GEMINI_API_KEY em GeminiClient",
                     lambda: _run_with_monkeypatch(
                         test_gemini_client_rejects_missing_or_placeholder_api_key
+                    ),
+                ),
+                (
+                    "Retrocompatibilidade de JSON legado sem latency_ms",
+                    test_execution_record_legacy_json_without_latency_ms,
+                ),
+                (
+                    "Telemetria latency_ms em execução API e preservação no Cache Hit",
+                    lambda: test_pipeline_latency_telemetry_api_and_cache_hit(
+                        base_tmp / "latency"
                     ),
                 ),
             ]
