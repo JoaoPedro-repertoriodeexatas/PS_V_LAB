@@ -12,3 +12,4 @@ __pycache__/
 
 # Histórico local de execuções (exemplos versionáveis ficam em /samples)
 data/history.json
+
