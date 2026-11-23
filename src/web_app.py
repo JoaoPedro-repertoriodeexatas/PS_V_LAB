@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from collections import defaultdict
+import csv
 import html
+import io
 import json
-import sys
 from pathlib import Path
-from typing import Any
+import re
+from statistics import fmean
+import sys
+from typing import Any, get_args
 
 from pydantic import ValidationError
 
@@ -20,7 +25,14 @@ from src.cli import (  # noqa: E402
     load_profiles,
     load_tickets,
 )
-from src.models import ContentType, CustomerProfile, ExecutionRecord, TicketItem  # noqa: E402
+from src.models import (  # noqa: E402
+    Channel,
+    ContentType,
+    CustomerProfile,
+    ExecutionRecord,
+    TechnicalLevel,
+    TicketItem,
+)
 from src.pipeline import (  # noqa: E402
     PipelineExecutionResult,
     build_rubric_evaluation,
@@ -35,6 +47,10 @@ from src.services import (  # noqa: E402
     JsonHistoryStorage,
     LLMServiceError,
 )
+
+_TICKET_ID_PATTERN = re.compile(r"\[(TKT-[A-Za-z0-9_-]+)\]")
+_TECHNICAL_LEVELS: tuple[str, ...] = get_args(TechnicalLevel)
+_CHANNELS: tuple[str, ...] = get_args(Channel)
 
 _ARTIFACT_GUIDE: tuple[tuple[ContentType, str], ...] = (
     ("diagnosis", "Hipóteses, evidências, lacunas e conclusão"),
@@ -394,23 +410,266 @@ def export_history_json(records: list[ExecutionRecord]) -> str:
     )
 
 
+def _compute_rubric_group_stats(group: list[ExecutionRecord]) -> dict[str, int | float]:
+    """Calcula contagem e médias arredondadas em 2 casas decimais para um grupo avaliado."""
+    if not group:
+        return {
+            "count": 0,
+            "clarity_avg": 0.0,
+            "customer_fit_avg": 0.0,
+            "actionability_avg": 0.0,
+            "total_avg": 0.0,
+        }
+
+    clarity_scores = [r.evaluation.clarity.score for r in group if r.evaluation is not None]
+    fit_scores = [r.evaluation.customer_fit.score for r in group if r.evaluation is not None]
+    act_scores = [r.evaluation.actionability.score for r in group if r.evaluation is not None]
+    totals = [c + f + a for c, f, a in zip(clarity_scores, fit_scores, act_scores)]
+
+    return {
+        "count": len(group),
+        "clarity_avg": round(fmean(clarity_scores), 2),
+        "customer_fit_avg": round(fmean(fit_scores), 2),
+        "actionability_avg": round(fmean(act_scores), 2),
+        "total_avg": round(fmean(totals), 2),
+    }
+
+
+def aggregate_rubric_metrics(
+    records: list[ExecutionRecord],
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """Agrega médias da rubrica por versão, por (versão, tipo) e calcula deltas v2 vs v1."""
+    evaluated = [
+        r
+        for r in records
+        if r.evaluation is not None
+        and (content_type is None or r.content_type == content_type)
+    ]
+
+    grouped_by_version: dict[str, list[ExecutionRecord]] = defaultdict(list)
+    grouped_cross: dict[tuple[str, str], list[ExecutionRecord]] = defaultdict(list)
+
+    for rec in evaluated:
+        grouped_by_version[rec.prompt_version].append(rec)
+        grouped_cross[(rec.prompt_version, rec.content_type)].append(rec)
+
+    ordered_versions = ["v1", "v2"] + sorted(
+        ver for ver in grouped_by_version if ver not in ("v1", "v2")
+    )
+    by_version: dict[str, dict[str, int | float]] = {
+        ver: _compute_rubric_group_stats(grouped_by_version.get(ver, []))
+        for ver in ordered_versions
+    }
+
+    by_version_and_type: list[dict[str, Any]] = [
+        {
+            "prompt_version": version,
+            "content_type": ctype,
+            **_compute_rubric_group_stats(group_records),
+        }
+        for (version, ctype), group_records in sorted(grouped_cross.items())
+    ]
+
+    v1_stats = by_version["v1"]
+    v2_stats = by_version["v2"]
+    if v1_stats["count"] > 0 and v2_stats["count"] > 0:
+        deltas_v2_vs_v1: dict[str, float] | None = {
+            "clarity_avg": round(
+                float(v2_stats["clarity_avg"]) - float(v1_stats["clarity_avg"]), 2
+            ),
+            "customer_fit_avg": round(
+                float(v2_stats["customer_fit_avg"]) - float(v1_stats["customer_fit_avg"]), 2
+            ),
+            "actionability_avg": round(
+                float(v2_stats["actionability_avg"]) - float(v1_stats["actionability_avg"]), 2
+            ),
+            "total_avg": round(
+                float(v2_stats["total_avg"]) - float(v1_stats["total_avg"]), 2
+            ),
+        }
+    else:
+        deltas_v2_vs_v1 = None
+
+    return {
+        "evaluated_count": len(evaluated),
+        "content_type_filter": content_type,
+        "by_version": by_version,
+        "by_version_and_type": by_version_and_type,
+        "deltas_v2_vs_v1": deltas_v2_vs_v1,
+    }
+
+
+def extract_ticket_identifier(ticket_text: str) -> str:
+    """Extrai código [TKT-XXX] do texto do ticket ou retorna 'Personalizado'."""
+    match = _TICKET_ID_PATTERN.search(ticket_text)
+    if match is not None:
+        return match.group(1)
+    return "Personalizado"
+
+
+def build_ticket_analytics_rows(
+    records: list[ExecutionRecord],
+    profiles: list[CustomerProfile],
+) -> list[dict[str, Any]]:
+    """Cruza ExecutionRecord com CustomerProfile para análise interativa de tickets."""
+    profile_by_id = {profile.customer_id: profile for profile in profiles}
+    rows: list[dict[str, Any]] = []
+
+    for rec in records:
+        profile = profile_by_id.get(rec.customer_id)
+        ev = rec.evaluation
+
+        if ev is not None:
+            clarity_score: int | None = ev.clarity.score
+            customer_fit_score: int | None = ev.customer_fit.score
+            actionability_score: int | None = ev.actionability.score
+            total_score: int | None = (
+                ev.clarity.score + ev.customer_fit.score + ev.actionability.score
+            )
+            is_evaluated = True
+        else:
+            clarity_score = None
+            customer_fit_score = None
+            actionability_score = None
+            total_score = None
+            is_evaluated = False
+
+        rows.append(
+            {
+                "cache_key": rec.cache_key,
+                "timestamp": rec.timestamp,
+                "ticket_id": extract_ticket_identifier(rec.ticket),
+                "ticket_preview": rec.ticket[:65],
+                "ticket_full": rec.ticket,
+                "customer_id": rec.customer_id,
+                "customer_name": profile.name if profile is not None else "desconhecido",
+                "technical_level": (
+                    profile.technical_level if profile is not None else "desconhecido"
+                ),
+                "communication_style": (
+                    profile.communication_style if profile is not None else "desconhecido"
+                ),
+                "channel": profile.channel if profile is not None else "desconhecido",
+                "content_type": rec.content_type,
+                "prompt_version": rec.prompt_version,
+                "provider": rec.provider,
+                "model": rec.model,
+                "temperature": rec.temperature,
+                "is_evaluated": is_evaluated,
+                "clarity_score": clarity_score,
+                "customer_fit_score": customer_fit_score,
+                "actionability_score": actionability_score,
+                "total_score": total_score,
+            }
+        )
+
+    return rows
+
+
+def summarize_by_ticket(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Agrupa linhas analíticas por ticket_id com totais e médias v1 vs v2."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["ticket_id"])].append(row)
+
+    summary: list[dict[str, Any]] = []
+    for ticket_id in sorted(grouped.keys()):
+        group = grouped[ticket_id]
+        evaluated_rows = [
+            r for r in group if r["is_evaluated"] and r["total_score"] is not None
+        ]
+        v1_totals = [
+            int(r["total_score"])
+            for r in evaluated_rows
+            if r["prompt_version"] == "v1"
+        ]
+        v2_totals = [
+            int(r["total_score"])
+            for r in evaluated_rows
+            if r["prompt_version"] == "v2"
+        ]
+
+        summary.append(
+            {
+                "ticket_id": ticket_id,
+                "total_executions": len(group),
+                "evaluated_count": len(evaluated_rows),
+                "avg_total_score": (
+                    round(fmean(int(r["total_score"]) for r in evaluated_rows), 2)
+                    if evaluated_rows
+                    else None
+                ),
+                "v1_avg_total": round(fmean(v1_totals), 2) if v1_totals else None,
+                "v2_avg_total": round(fmean(v2_totals), 2) if v2_totals else None,
+            }
+        )
+
+    return summary
+
+
+def _export_analytics_csv(rows: list[dict[str, Any]]) -> str:
+    """Serializa as linhas analíticas cruzadas em CSV UTF-8 para download."""
+    fieldnames = [
+        "timestamp",
+        "ticket_id",
+        "customer_id",
+        "customer_name",
+        "technical_level",
+        "communication_style",
+        "channel",
+        "content_type",
+        "prompt_version",
+        "provider",
+        "model",
+        "temperature",
+        "is_evaluated",
+        "clarity_score",
+        "customer_fit_score",
+        "actionability_score",
+        "total_score",
+        "cache_key",
+        "ticket_preview",
+        "ticket_full",
+    ]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
 def _inject_custom_css(st: Any) -> None:
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
 
-def _render_profile_badges(st: Any, profile: CustomerProfile) -> None:
-    level = html.escape(profile.technical_level)
-    style = html.escape(profile.communication_style)
-    channel = html.escape(profile.channel)
+def _render_badge_pills_raw(
+    st: Any,
+    technical_level: str,
+    communication_style: str,
+    channel: str,
+) -> None:
+    level = html.escape(technical_level)
+    style = html.escape(communication_style)
+    chan = html.escape(channel)
     st.markdown(
         (
             '<div class="badge-row">'
             f'<span class="badge-pill badge-level"><span class="badge-label">Nível</span> {level}</span>'
             f'<span class="badge-pill badge-style"><span class="badge-label">Estilo</span> {style}</span>'
-            f'<span class="badge-pill badge-channel"><span class="badge-label">Canal</span> {channel}</span>'
+            f'<span class="badge-pill badge-channel"><span class="badge-label">Canal</span> {chan}</span>'
             "</div>"
         ),
         unsafe_allow_html=True,
+    )
+
+
+def _render_profile_badges(st: Any, profile: CustomerProfile) -> None:
+    _render_badge_pills_raw(
+        st,
+        profile.technical_level,
+        profile.communication_style,
+        profile.channel,
     )
 
 
@@ -595,6 +854,669 @@ def _render_output_and_rubric(
                 )
             except (ValidationError, ValueError, KeyError) as exc:
                 st.error(f"Não foi possível salvar a rubrica: {exc}")
+
+
+def _render_ticket_dashboard(
+    st: Any,
+    all_records: list[ExecutionRecord],
+    profiles: list[CustomerProfile],
+    storage: JsonHistoryStorage,
+) -> None:
+    """Renderiza o Dashboard Interativo de Análise de Tickets e Atendimento na Aba 3."""
+    import altair as alt
+    import pandas as pd
+
+    if not all_records:
+        with st.container(border=True):
+            st.info(
+                f"Nenhuma execução registrada ainda em `{storage.file_path}`. "
+                "Gere atendimentos na Aba 1 ou comparações na Aba 2 para alimentar o dashboard."
+            )
+        return
+
+    all_rows = build_ticket_analytics_rows(all_records, profiles)
+    paired_all = list(zip(all_records, all_rows))
+
+    # A. BARRA SUPERIOR DE FILTROS GLOBAIS + EXPORTAÇÃO
+    with st.container(border=True):
+        st.markdown("#### Filtros Globais e Exportação")
+        ticket_options = ["Todos"] + sorted({r["ticket_id"] for r in all_rows})
+        level_options = ["Todos"] + list(_TECHNICAL_LEVELS)
+        extra_levels = sorted(
+            {
+                r["technical_level"]
+                for r in all_rows
+                if r["technical_level"] not in _TECHNICAL_LEVELS
+            }
+        )
+        level_options.extend(extra_levels)
+
+        channel_options = ["Todos"] + list(_CHANNELS)
+        extra_channels = sorted(
+            {r["channel"] for r in all_rows if r["channel"] not in _CHANNELS}
+        )
+        channel_options.extend(extra_channels)
+
+        type_options = ["Todos"] + list(CONTENT_TYPES)
+        version_options = ["Todas"] + list(AVAILABLE_VERSIONS)
+
+        fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+        sel_ticket = fc1.selectbox("Ticket", ticket_options, key="dash_filter_ticket")
+        sel_level = fc2.selectbox("Nível Técnico", level_options, key="dash_filter_level")
+        sel_channel = fc3.selectbox("Canal", channel_options, key="dash_filter_channel")
+        sel_type = fc4.selectbox("Tipo de Artefato", type_options, key="dash_filter_type")
+        sel_version = fc5.selectbox("Versão", version_options, key="dash_filter_version")
+
+        filtered_pairs = [
+            (rec, row)
+            for rec, row in paired_all
+            if (sel_ticket == "Todos" or row["ticket_id"] == sel_ticket)
+            and (sel_level == "Todos" or row["technical_level"] == sel_level)
+            and (sel_channel == "Todos" or row["channel"] == sel_channel)
+            and (sel_type == "Todos" or row["content_type"] == sel_type)
+            and (sel_version == "Todas" or row["prompt_version"] == sel_version)
+        ]
+
+        ac1, ac2, ac3 = st.columns([1.4, 1.0, 1.0])
+        with ac1:
+            only_evaluated = st.checkbox(
+                "Somente execuções avaliadas",
+                value=False,
+                key="dash_filter_only_eval",
+            )
+        if only_evaluated:
+            filtered_pairs = [(rec, row) for rec, row in filtered_pairs if row["is_evaluated"]]
+
+        filtered_records = [rec for rec, _ in filtered_pairs]
+        filtered_rows = [row for _, row in filtered_pairs]
+
+        with ac2:
+            st.download_button(
+                label=f"Baixar JSON Filtrado ({len(filtered_records)})",
+                data=export_history_json(filtered_records),
+                file_name="history_filtered.json",
+                mime="application/json",
+                use_container_width=True,
+                key="dash_dl_json",
+            )
+        with ac3:
+            st.download_button(
+                label=f"Baixar CSV Analítico ({len(filtered_rows)})",
+                data=_export_analytics_csv(filtered_rows),
+                file_name="tickets_analytics.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dash_dl_csv",
+            )
+
+    if not filtered_rows:
+        with st.container(border=True):
+            st.info("Nenhuma execução corresponde aos filtros selecionados.")
+        return
+
+    # B. LINHA DE KPIs DINÂMICOS (REAGEM AOS FILTROS)
+    evaluated_rows = [r for r in filtered_rows if r["is_evaluated"] and r["total_score"] is not None]
+    analytics = aggregate_rubric_metrics(filtered_records)
+    deltas = analytics["deltas_v2_vs_v1"]
+    ticket_summaries = summarize_by_ticket(filtered_rows)
+
+    if evaluated_rows:
+        overall_avg = round(fmean(int(r["total_score"]) for r in evaluated_rows), 2)
+        dim_avgs = {
+            "Clareza": round(fmean(int(r["clarity_score"]) for r in evaluated_rows), 2),
+            "Adequação": round(fmean(int(r["customer_fit_score"]) for r in evaluated_rows), 2),
+            "Acionabilidade": round(
+                fmean(int(r["actionability_score"]) for r in evaluated_rows), 2
+            ),
+        }
+        best_dim_name, best_dim_score = max(dim_avgs.items(), key=lambda item: item[1])
+        evaluated_tickets = [
+            t for t in ticket_summaries if t["avg_total_score"] is not None
+        ]
+        critical_ticket = (
+            min(evaluated_tickets, key=lambda t: float(t["avg_total_score"]))
+            if evaluated_tickets
+            else None
+        )
+    else:
+        overall_avg = None
+        best_dim_name, best_dim_score = None, None
+        critical_ticket = None
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        with st.container(border=True):
+            st.metric("Execuções no Recorte", len(filtered_rows))
+            st.caption(f"{len(evaluated_rows)} avaliada(s) com rubrica")
+    with k2:
+        with st.container(border=True):
+            st.metric(
+                "Nota Média Geral (/15)",
+                f"{overall_avg:.2f}" if overall_avg is not None else "—",
+                delta=(
+                    f"{deltas['total_avg']:+.2f} (v2 vs v1)"
+                    if deltas is not None
+                    else None
+                ),
+            )
+            if deltas is None:
+                st.caption("Avalie v1 e v2 no recorte para ver o delta")
+    with k3:
+        with st.container(border=True):
+            st.metric("Melhor Dimensão", best_dim_name if best_dim_name else "—")
+            st.caption(
+                f"Média: {best_dim_score:.2f} / 5.00"
+                if best_dim_score is not None
+                else "Sem avaliações no recorte"
+            )
+    with k4:
+        with st.container(border=True):
+            st.metric(
+                "Ticket Mais Crítico",
+                critical_ticket["ticket_id"] if critical_ticket else "—",
+            )
+            st.caption(
+                f"Média: {critical_ticket['avg_total_score']:.2f} / 15"
+                if critical_ticket is not None
+                else "Sem tickets avaliados"
+            )
+
+    # C. VISUALIZAÇÕES INTERATIVAS EM GRID (2 x 2)
+    palette_map = {"v1": "#818CF8", "v2": "#38BDF8"}
+    fallback_colors = ("#10B981", "#F59E0B", "#A78BFA")
+
+    row1_left, row1_right = st.columns(2, gap="medium")
+
+    # C1. Desempenho por Ticket: v1 vs v2 (Barras horizontais agrupadas)
+    with row1_left:
+        with st.container(border=True):
+            st.markdown("##### Desempenho por Ticket (`v1` vs `v2`)")
+            if not evaluated_rows:
+                st.info("Avalie execuções com a rubrica para visualizar o desempenho por ticket.")
+            else:
+                ticket_ver_groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+                for row in evaluated_rows:
+                    ticket_ver_groups[(row["ticket_id"], row["prompt_version"])].append(row)
+
+                t_chart_rows: list[dict[str, Any]] = []
+                for (tid, ver), grp in sorted(ticket_ver_groups.items()):
+                    t_chart_rows.append(
+                        {
+                            "ticket_id": tid,
+                            "version": ver,
+                            "avg_total": round(fmean(int(r["total_score"]) for r in grp), 2),
+                            "count": len(grp),
+                            "clarity_avg": round(fmean(int(r["clarity_score"]) for r in grp), 2),
+                            "fit_avg": round(
+                                fmean(int(r["customer_fit_score"]) for r in grp), 2
+                            ),
+                            "act_avg": round(
+                                fmean(int(r["actionability_score"]) for r in grp), 2
+                            ),
+                        }
+                    )
+
+                active_t_versions = sorted({r["version"] for r in t_chart_rows})
+                t_colors = [
+                    palette_map.get(v, fallback_colors[i % len(fallback_colors)])
+                    for i, v in enumerate(active_t_versions)
+                ]
+
+                ticket_chart = (
+                    alt.Chart(alt.Data(values=t_chart_rows))
+                    .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                    .encode(
+                        y=alt.Y(
+                            "ticket_id:N",
+                            title=None,
+                            axis=alt.Axis(
+                                labelColor="#E6EDF3",
+                                labelFontSize=11,
+                                domainColor="#334155",
+                                tickColor="#334155",
+                            ),
+                        ),
+                        yOffset=alt.YOffset("version:N", sort=active_t_versions),
+                        x=alt.X(
+                            "avg_total:Q",
+                            scale=alt.Scale(domain=[0, 15]),
+                            title="Nota Média (/15)",
+                            axis=alt.Axis(
+                                values=[0, 3, 6, 9, 12, 15],
+                                labelColor="#E6EDF3",
+                                titleColor="#94A3B8",
+                                gridColor="rgba(148, 163, 184, 0.16)",
+                                domainColor="#334155",
+                            ),
+                        ),
+                        color=alt.Color(
+                            "version:N",
+                            scale=alt.Scale(domain=active_t_versions, range=t_colors),
+                            legend=alt.Legend(
+                                title="Versão",
+                                orient="top",
+                                labelColor="#E6EDF3",
+                                titleColor="#94A3B8",
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("ticket_id:N", title="Ticket"),
+                            alt.Tooltip("version:N", title="Versão"),
+                            alt.Tooltip("avg_total:Q", title="Média Total (/15)", format=".2f"),
+                            alt.Tooltip("count:Q", title="Avaliações"),
+                            alt.Tooltip("clarity_avg:Q", title="Clareza (/5)", format=".2f"),
+                            alt.Tooltip("fit_avg:Q", title="Adequação (/5)", format=".2f"),
+                            alt.Tooltip("act_avg:Q", title="Acionabilidade (/5)", format=".2f"),
+                        ],
+                    )
+                    .properties(height=270)
+                    .configure(background="transparent")
+                    .configure_view(stroke=None)
+                )
+                st.altair_chart(ticket_chart, use_container_width=True)
+
+    # C2. Heatmap: Nível Técnico × Canal
+    with row1_right:
+        with st.container(border=True):
+            hm_hdr_l, hm_hdr_r = st.columns([1.4, 1])
+            with hm_hdr_l:
+                st.markdown("##### Heatmap: Nível Técnico × Canal")
+            with hm_hdr_r:
+                hm_metric = st.radio(
+                    "Métrica",
+                    options=["Total (/15)", "Adequação (/5)"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="dash_heatmap_metric",
+                )
+
+            if not evaluated_rows:
+                st.info("Avalie execuções com a rubrica para habilitar a matriz Nível × Canal.")
+            else:
+                hm_groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+                for row in evaluated_rows:
+                    hm_groups[(row["technical_level"], row["channel"])].append(row)
+
+                use_total = hm_metric == "Total (/15)"
+                hm_domain = [0, 15] if use_total else [0, 5]
+                hm_rows: list[dict[str, Any]] = []
+                for (lvl, ch), grp in sorted(hm_groups.items()):
+                    val = round(
+                        fmean(
+                            int(r["total_score"] if use_total else r["customer_fit_score"])
+                            for r in grp
+                        ),
+                        2,
+                    )
+                    hm_rows.append(
+                        {
+                            "technical_level": lvl,
+                            "channel": ch,
+                            "metric_val": val,
+                            "label": f"{val:.1f}",
+                            "count": len(grp),
+                        }
+                    )
+
+                hm_base = alt.Chart(alt.Data(values=hm_rows)).encode(
+                    x=alt.X(
+                        "channel:N",
+                        title="Canal de Atendimento",
+                        axis=alt.Axis(
+                            labelAngle=0,
+                            labelColor="#E6EDF3",
+                            titleColor="#94A3B8",
+                            domainColor="#334155",
+                        ),
+                    ),
+                    y=alt.Y(
+                        "technical_level:N",
+                        title="Nível Técnico",
+                        axis=alt.Axis(
+                            labelColor="#E6EDF3",
+                            titleColor="#94A3B8",
+                            domainColor="#334155",
+                        ),
+                    ),
+                )
+                rects = hm_base.mark_rect(cornerRadius=6, stroke="#0E1117", strokeWidth=2).encode(
+                    color=alt.Color(
+                        "metric_val:Q",
+                        scale=alt.Scale(
+                            domain=hm_domain,
+                            range=["#1E293B", "#0284C7", "#10B981"],
+                        ),
+                        legend=alt.Legend(
+                            title=hm_metric,
+                            labelColor="#E6EDF3",
+                            titleColor="#94A3B8",
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("technical_level:N", title="Nível Técnico"),
+                        alt.Tooltip("channel:N", title="Canal"),
+                        alt.Tooltip("metric_val:Q", title=hm_metric, format=".2f"),
+                        alt.Tooltip("count:Q", title="Avaliações"),
+                    ],
+                )
+                labels = hm_base.mark_text(
+                    fontSize=13,
+                    fontWeight="bold",
+                    color="#E6EDF3",
+                ).encode(text="label:N")
+
+                heatmap_chart = (
+                    (rects + labels)
+                    .properties(height=270)
+                    .configure(background="transparent")
+                    .configure_view(stroke=None)
+                )
+                st.altair_chart(heatmap_chart, use_container_width=True)
+
+    row2_left, row2_right = st.columns(2, gap="medium")
+
+    # C3. Comparativo por Critério da Rubrica (v1 vs v2)
+    with row2_left:
+        with st.container(border=True):
+            st.markdown("##### Comparativo por Critério da Rubrica (`v1` vs `v2`)")
+            if analytics["evaluated_count"] == 0:
+                st.info("Avalie execuções para comparar Clareza, Adequação e Acionabilidade.")
+            else:
+                by_version = analytics["by_version"]
+                criterion_specs = (
+                    ("Clareza", "clarity_avg"),
+                    ("Adequação", "customer_fit_avg"),
+                    ("Acionabilidade", "actionability_avg"),
+                )
+                active_versions = [v for v, s in by_version.items() if s["count"] > 0]
+                crit_rows = [
+                    {
+                        "version": ver,
+                        "criterion": label,
+                        "score": by_version[ver][key],
+                        "count": by_version[ver]["count"],
+                    }
+                    for ver in active_versions
+                    for label, key in criterion_specs
+                ]
+                crit_colors = [
+                    palette_map.get(v, fallback_colors[i % len(fallback_colors)])
+                    for i, v in enumerate(active_versions)
+                ]
+
+                crit_chart = (
+                    alt.Chart(alt.Data(values=crit_rows))
+                    .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, size=30)
+                    .encode(
+                        x=alt.X(
+                            "criterion:N",
+                            sort=["Clareza", "Adequação", "Acionabilidade"],
+                            title=None,
+                            axis=alt.Axis(
+                                labelAngle=0,
+                                labelColor="#E6EDF3",
+                                labelFontSize=11,
+                                domainColor="#334155",
+                            ),
+                        ),
+                        xOffset=alt.XOffset("version:N", sort=active_versions),
+                        y=alt.Y(
+                            "score:Q",
+                            scale=alt.Scale(domain=[0, 5]),
+                            title="Nota Média (0 a 5)",
+                            axis=alt.Axis(
+                                values=[0, 1, 2, 3, 4, 5],
+                                labelColor="#E6EDF3",
+                                titleColor="#94A3B8",
+                                gridColor="rgba(148, 163, 184, 0.16)",
+                                domainColor="#334155",
+                            ),
+                        ),
+                        color=alt.Color(
+                            "version:N",
+                            scale=alt.Scale(domain=active_versions, range=crit_colors),
+                            legend=alt.Legend(
+                                title="Versão",
+                                orient="top",
+                                labelColor="#E6EDF3",
+                                titleColor="#94A3B8",
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("version:N", title="Versão"),
+                            alt.Tooltip("criterion:N", title="Critério"),
+                            alt.Tooltip("score:Q", title="Média (/5)", format=".2f"),
+                            alt.Tooltip("count:Q", title="Amostras"),
+                        ],
+                    )
+                    .properties(height=270)
+                    .configure(background="transparent")
+                    .configure_view(stroke=None)
+                )
+                st.altair_chart(crit_chart, use_container_width=True)
+
+    # C4. Distribuição por Tipo de Artefato (content_type)
+    with row2_right:
+        with st.container(border=True):
+            st.markdown("##### Distribuição por Tipo de Artefato (`content_type`)")
+            ct_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for row in filtered_rows:
+                ct_groups[row["content_type"]].append(row)
+
+            ct_rows: list[dict[str, Any]] = []
+            for ct in CONTENT_TYPES:
+                grp = ct_groups.get(ct, [])
+                if not grp:
+                    continue
+                ev_grp = [r for r in grp if r["is_evaluated"] and r["total_score"] is not None]
+                avg_t = (
+                    round(fmean(int(r["total_score"]) for r in ev_grp), 2)
+                    if ev_grp
+                    else None
+                )
+                ct_rows.append(
+                    {
+                        "content_type": ct,
+                        "executions": len(grp),
+                        "evaluated": len(ev_grp),
+                        "avg_total": avg_t if avg_t is not None else 0.0,
+                        "avg_label": f"{avg_t:.1f}/15" if avg_t is not None else "S/ nota",
+                    }
+                )
+
+            ct_base = alt.Chart(alt.Data(values=ct_rows)).encode(
+                x=alt.X(
+                    "content_type:N",
+                    sort=list(CONTENT_TYPES),
+                    title=None,
+                    axis=alt.Axis(
+                        labelAngle=0,
+                        labelColor="#E6EDF3",
+                        labelFontSize=11,
+                        domainColor="#334155",
+                    ),
+                ),
+                y=alt.Y(
+                    "executions:Q",
+                    title="Volume de Execuções",
+                    axis=alt.Axis(
+                        tickMinStep=1,
+                        labelColor="#E6EDF3",
+                        titleColor="#94A3B8",
+                        gridColor="rgba(148, 163, 184, 0.16)",
+                        domainColor="#334155",
+                    ),
+                ),
+            )
+            ct_bars = ct_base.mark_bar(
+                cornerRadiusTopLeft=5,
+                cornerRadiusTopRight=5,
+                size=42,
+            ).encode(
+                color=alt.Color(
+                    "avg_total:Q",
+                    scale=alt.Scale(
+                        domain=[0, 15],
+                        range=["#475569", "#38BDF8", "#10B981"],
+                    ),
+                    legend=alt.Legend(
+                        title="Nota Média (/15)",
+                        orient="top",
+                        labelColor="#E6EDF3",
+                        titleColor="#94A3B8",
+                    ),
+                ),
+                tooltip=[
+                    alt.Tooltip("content_type:N", title="Artefato"),
+                    alt.Tooltip("executions:Q", title="Execuções"),
+                    alt.Tooltip("evaluated:Q", title="Avaliadas"),
+                    alt.Tooltip("avg_label:N", title="Nota Média"),
+                ],
+            )
+            ct_labels = ct_base.mark_text(
+                dy=-8,
+                fontSize=11,
+                fontWeight="bold",
+                color="#E6EDF3",
+            ).encode(text="avg_label:N")
+
+            ct_chart = (
+                (ct_bars + ct_labels)
+                .properties(height=270)
+                .configure(background="transparent")
+                .configure_view(stroke=None)
+            )
+            st.altair_chart(ct_chart, use_container_width=True)
+
+    # D. EXPLORADOR INTERATIVO DE TICKETS COM DRILL-DOWN (on_select="rerun")
+    with st.container(border=True):
+        st.markdown("#### Explorador Interativo de Tickets")
+        st.caption(
+            "Clique em qualquer linha da tabela abaixo para abrir o painel inspetor completo "
+            "da execução selecionada."
+        )
+
+        ordered_pairs = list(reversed(filtered_pairs))
+        display_df = pd.DataFrame(
+            [
+                {
+                    "Ticket": row["ticket_id"],
+                    "Cliente": row["customer_name"],
+                    "Nível": row["technical_level"],
+                    "Canal": row["channel"],
+                    "Artefato": row["content_type"],
+                    "Versão": row["prompt_version"],
+                    "Clareza": row["clarity_score"] if row["clarity_score"] is not None else "—",
+                    "Adequação": (
+                        row["customer_fit_score"]
+                        if row["customer_fit_score"] is not None
+                        else "—"
+                    ),
+                    "Acionabilidade": (
+                        row["actionability_score"]
+                        if row["actionability_score"] is not None
+                        else "—"
+                    ),
+                    "Total (/15)": (
+                        row["total_score"] if row["total_score"] is not None else "—"
+                    ),
+                    "Data": row["timestamp"][:19].replace("T", " "),
+                }
+                for _, row in ordered_pairs
+            ]
+        )
+
+        selection_event = st.dataframe(
+            display_df,
+            on_select="rerun",
+            selection_mode="single-row",
+            use_container_width=True,
+            hide_index=True,
+            key="ticket_explorer_table",
+        )
+
+        selected_indices = (
+            selection_event.selection.rows
+            if selection_event is not None and hasattr(selection_event, "selection")
+            else []
+        )
+        selected_idx = selected_indices[0] if selected_indices else 0
+        if selected_idx >= len(ordered_pairs):
+            selected_idx = 0
+
+        sel_rec, sel_row = ordered_pairs[selected_idx]
+
+    # PAINEL INSPETOR DO TICKET SELECIONADO
+    with st.container(border=True):
+        badge_ver_cls = "badge-v2" if sel_row["prompt_version"] == "v2" else "badge-v1"
+        st.markdown(
+            (
+                '<div class="version-header">'
+                f'<span class="version-title">Inspetor de Execução · '
+                f'{html.escape(sel_row["ticket_id"])} ({html.escape(sel_row["content_type"])})</span>'
+                f'<span class="badge-pill {badge_ver_cls}">'
+                f'{html.escape(sel_row["prompt_version"])}</span>'
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+        col_left, col_right = st.columns([1, 1.3], gap="large")
+        with col_left:
+            st.markdown(
+                f"**Cliente:** {sel_row['customer_name']} (`{sel_row['customer_id']}`)"
+            )
+            _render_badge_pills_raw(
+                st,
+                sel_row["technical_level"],
+                sel_row["communication_style"],
+                sel_row["channel"],
+            )
+
+            meta_html = (
+                f"modelo={html.escape(sel_rec.provider)}/{html.escape(sel_rec.model)} | "
+                f"temp={sel_rec.temperature} | "
+                f"utc={html.escape(sel_rec.timestamp)}<br/>"
+                f"cache_key={html.escape(sel_rec.cache_key)}"
+            )
+            st.markdown(f'<div class="meta-bar">{meta_html}</div>', unsafe_allow_html=True)
+
+            st.markdown("**Enunciado Completo do Ticket**")
+            st.markdown(
+                f'<div class="ticket-preview">{html.escape(sel_rec.ticket)}</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write("")
+            st.markdown("**Avaliação da Rubrica**")
+            if sel_rec.evaluation is not None:
+                ev = sel_rec.evaluation
+                rc1, rc2, rc3 = st.columns(3)
+                with rc1:
+                    with st.container(border=True):
+                        st.metric("Clareza", f"{ev.clarity.score}/5")
+                        st.caption(ev.clarity.justification)
+                with rc2:
+                    with st.container(border=True):
+                        st.metric("Adequação", f"{ev.customer_fit.score}/5")
+                        st.caption(ev.customer_fit.justification)
+                with rc3:
+                    with st.container(border=True):
+                        st.metric("Acionabilidade", f"{ev.actionability.score}/5")
+                        st.caption(ev.actionability.justification)
+            else:
+                st.info("Esta execução ainda não foi avaliada com a rubrica.")
+
+        with col_right:
+            st.markdown("**Resposta Gerada pela IA**")
+            with st.container(border=True):
+                out_text = format_output_text(sel_rec.output)
+                if sel_rec.content_type == "flow_summary":
+                    st.code(out_text, language="text")
+                elif isinstance(sel_rec.output, dict):
+                    st.json(sel_rec.output)
+                else:
+                    st.markdown(out_text)
 
 
 def _render_sidebar(
@@ -895,7 +1817,7 @@ def render_app() -> None:
                         on_evaluated=_update_v2_state,
                     )
 
-    # ABA 3 — HISTÓRICO E AUDITORIA
+    # ABA 3 — HISTÓRICO E AUDITORIA (DASHBOARD INTERATIVO DE TICKETS)
     with tab_history:
         try:
             all_records = storage.load_all()
@@ -903,106 +1825,7 @@ def render_app() -> None:
             st.error(f"Erro ao carregar histórico JSON: {exc}")
             all_records = []
 
-        metrics = summarize_history(all_records)
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            with st.container(border=True):
-                st.metric("Total de Execuções", metrics["total"])
-        with m2:
-            with st.container(border=True):
-                st.metric("Avaliadas com Rubrica", metrics["evaluated"])
-        with m3:
-            with st.container(border=True):
-                st.metric("Execuções v1", metrics["v1"])
-        with m4:
-            with st.container(border=True):
-                st.metric("Execuções v2", metrics["v2"])
-
-        if not all_records:
-            with st.container(border=True):
-                st.info(f"Nenhuma execução registrada ainda em `{storage.file_path}`.")
-        else:
-            with st.container(border=True):
-                f1, f2, f3, f4, f5 = st.columns([1.1, 1.1, 0.9, 1.0, 1.15])
-                customer_options = ["Todos"] + sorted({r.customer_id for r in all_records})
-                type_options = ["Todos"] + list(CONTENT_TYPES)
-                version_options = ["Todas"] + list(AVAILABLE_VERSIONS)
-
-                selected_cust_filter = f1.selectbox("Cliente", customer_options)
-                selected_type_filter = f2.selectbox("Tipo", type_options)
-                selected_ver_filter = f3.selectbox("Versão", version_options)
-                with f4:
-                    st.write("")
-                    st.write("")
-                    only_eval = st.checkbox("Somente avaliadas", value=False)
-
-                filtered_records = filter_history_records(
-                    all_records,
-                    customer_id=(
-                        None if selected_cust_filter == "Todos" else selected_cust_filter
-                    ),
-                    content_type=(
-                        None if selected_type_filter == "Todos" else selected_type_filter
-                    ),
-                    prompt_version=(
-                        None if selected_ver_filter == "Todas" else selected_ver_filter
-                    ),
-                    only_evaluated=only_eval,
-                )
-
-                with f5:
-                    st.write("")
-                    st.download_button(
-                        label=f"Baixar JSON ({len(filtered_records)})",
-                        data=export_history_json(filtered_records),
-                        file_name="history_export.json",
-                        mime="application/json",
-                        use_container_width=True,
-                    )
-
-            for idx, rec in enumerate(reversed(filtered_records), start=1):
-                if rec.evaluation is not None:
-                    total_score = (
-                        rec.evaluation.clarity.score
-                        + rec.evaluation.customer_fit.score
-                        + rec.evaluation.actionability.score
-                    )
-                    eval_tag = f"Nota: {total_score}/15"
-                else:
-                    eval_tag = "Sem rubrica"
-
-                header = (
-                    f"#{idx} | {rec.timestamp[:19]} UTC | {rec.customer_id} | "
-                    f"{rec.content_type} ({rec.prompt_version}) | {eval_tag}"
-                )
-                with st.expander(header):
-                    st.caption(
-                        f"Modelo: `{rec.provider}/{rec.model}` (temp={rec.temperature}) | "
-                        f"Cache Key: `{rec.cache_key}`"
-                    )
-                    st.markdown(f"**Ticket:** {rec.ticket}")
-                    out_text = format_output_text(rec.output)
-                    if rec.content_type == "flow_summary":
-                        st.code(out_text, language="text")
-                    else:
-                        st.markdown(out_text)
-
-                    if rec.evaluation is not None:
-                        ev = rec.evaluation
-                        st.markdown("**Rubrica Registrada:**")
-                        rc1, rc2, rc3 = st.columns(3)
-                        with rc1:
-                            with st.container(border=True):
-                                st.metric("Clareza", f"{ev.clarity.score}/5")
-                                st.caption(ev.clarity.justification)
-                        with rc2:
-                            with st.container(border=True):
-                                st.metric("Adequação", f"{ev.customer_fit.score}/5")
-                                st.caption(ev.customer_fit.justification)
-                        with rc3:
-                            with st.container(border=True):
-                                st.metric("Acionabilidade", f"{ev.actionability.score}/5")
-                                st.caption(ev.actionability.justification)
+        _render_ticket_dashboard(st, all_records, profiles, storage)
 
 
 if __name__ == "__main__":

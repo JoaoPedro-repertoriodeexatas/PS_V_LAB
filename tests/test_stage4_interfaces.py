@@ -15,6 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src import cli as cli_module  # noqa: E402
 from src import web_app as web_app_module  # noqa: E402
+from src.models import ContentType, ExecutionRecord  # noqa: E402
+from src.pipeline import build_rubric_evaluation  # noqa: E402
 from src.services import BaseLLMClient, JsonHistoryStorage, LLMServiceError  # noqa: E402
 
 ASCII_SAMPLE = (
@@ -280,6 +282,243 @@ def test_web_app_helpers_offline(tmp_path: Path) -> None:
     assert isinstance(parsed_export, list) and len(parsed_export) == 1
 
 
+def _make_record(
+    cache_key: str,
+    prompt_version: str,
+    content_type: ContentType,
+    scores: tuple[int, int, int] | None = None,
+) -> ExecutionRecord:
+    evaluation = (
+        build_rubric_evaluation(
+            clarity_score=scores[0],
+            clarity_justification="Justificativa de clareza válida.",
+            customer_fit_score=scores[1],
+            customer_fit_justification="Justificativa de adequação válida.",
+            actionability_score=scores[2],
+            actionability_justification="Justificativa de acionabilidade válida.",
+        )
+        if scores is not None
+        else None
+    )
+    return ExecutionRecord(
+        cache_key=cache_key,
+        customer_id="cust_001",
+        ticket="Ticket de teste para agregação analítica.",
+        prompt_version=prompt_version,
+        content_type=content_type,
+        provider="google",
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        output="Saída simulada para agregação.",
+        evaluation=evaluation,
+    )
+
+
+def test_aggregate_rubric_metrics_empty_and_unevaluated() -> None:
+    """Valida aggregate_rubric_metrics para histórico vazio, sem avaliações e versão única."""
+    empty_res = web_app_module.aggregate_rubric_metrics([])
+    assert empty_res["evaluated_count"] == 0
+    assert empty_res["by_version"]["v1"]["count"] == 0
+    assert empty_res["by_version"]["v2"]["count"] == 0
+    assert empty_res["by_version_and_type"] == []
+    assert empty_res["deltas_v2_vs_v1"] is None
+
+    unevaluated_only = [
+        _make_record("k1", "v1", "diagnosis", scores=None),
+        _make_record("k2", "v2", "resolution", scores=None),
+    ]
+    uneval_res = web_app_module.aggregate_rubric_metrics(unevaluated_only)
+    assert uneval_res["evaluated_count"] == 0
+    assert uneval_res["by_version"]["v1"]["count"] == 0
+    assert uneval_res["by_version"]["v2"]["count"] == 0
+    assert uneval_res["by_version_and_type"] == []
+    assert uneval_res["deltas_v2_vs_v1"] is None
+
+    single_version = [_make_record("k3", "v2", "diagnosis", scores=(4, 5, 5))]
+    single_res = web_app_module.aggregate_rubric_metrics(single_version)
+    assert single_res["evaluated_count"] == 1
+    assert single_res["by_version"]["v1"]["count"] == 0
+    assert single_res["by_version"]["v2"]["count"] == 1
+    assert single_res["by_version"]["v2"]["total_avg"] == 14.0
+    assert single_res["deltas_v2_vs_v1"] is None
+
+
+def test_aggregate_rubric_metrics_averages_deltas_and_filter() -> None:
+    """Valida médias exatas, deltas v2 vs v1, filtro por content_type e cruzamento versão x tipo."""
+    records = [
+        # v1 diagnosis: (3, 2, 3) -> total 8; (4, 3, 2) -> total 9
+        _make_record("v1_d1", "v1", "diagnosis", scores=(3, 2, 3)),
+        _make_record("v1_d2", "v1", "diagnosis", scores=(4, 3, 2)),
+        # v1 resolution: (2, 4, 4) -> total 10
+        _make_record("v1_r1", "v1", "resolution", scores=(2, 4, 4)),
+        # v2 diagnosis: (4, 5, 5) -> total 14; (5, 5, 4) -> total 14
+        _make_record("v2_d1", "v2", "diagnosis", scores=(4, 5, 5)),
+        _make_record("v2_d2", "v2", "diagnosis", scores=(5, 5, 4)),
+        # v2 resolution: (5, 5, 5) -> total 15
+        _make_record("v2_r1", "v2", "resolution", scores=(5, 5, 5)),
+        # Registro não avaliado (deve ser ignorado)
+        _make_record("v2_none", "v2", "diagnosis", scores=None),
+    ]
+
+    overall = web_app_module.aggregate_rubric_metrics(records)
+    assert overall["evaluated_count"] == 6
+
+    # v1: clarity=(3+4+2)/3=3.0, fit=(2+3+4)/3=3.0, act=(3+2+4)/3=3.0, total=(8+9+10)/3=9.0
+    assert overall["by_version"]["v1"] == {
+        "count": 3,
+        "clarity_avg": 3.0,
+        "customer_fit_avg": 3.0,
+        "actionability_avg": 3.0,
+        "total_avg": 9.0,
+    }
+    # v2: clarity=(4+5+5)/3=4.67, fit=(5+5+5)/3=5.0, act=(5+4+5)/3=4.67, total=(14+14+15)/3=14.33
+    assert overall["by_version"]["v2"] == {
+        "count": 3,
+        "clarity_avg": 4.67,
+        "customer_fit_avg": 5.0,
+        "actionability_avg": 4.67,
+        "total_avg": 14.33,
+    }
+    assert overall["deltas_v2_vs_v1"] == {
+        "clarity_avg": 1.67,
+        "customer_fit_avg": 2.0,
+        "actionability_avg": 1.67,
+        "total_avg": 5.33,
+    }
+
+    cross = overall["by_version_and_type"]
+    assert len(cross) == 4
+    assert [(row["prompt_version"], row["content_type"]) for row in cross] == [
+        ("v1", "diagnosis"),
+        ("v1", "resolution"),
+        ("v2", "diagnosis"),
+        ("v2", "resolution"),
+    ]
+    assert cross[0] == {
+        "prompt_version": "v1",
+        "content_type": "diagnosis",
+        "count": 2,
+        "clarity_avg": 3.5,
+        "customer_fit_avg": 2.5,
+        "actionability_avg": 2.5,
+        "total_avg": 8.5,
+    }
+
+    diag_only = web_app_module.aggregate_rubric_metrics(records, content_type="diagnosis")
+    assert diag_only["evaluated_count"] == 4
+    assert diag_only["by_version"]["v1"]["total_avg"] == 8.5
+    assert diag_only["by_version"]["v2"]["total_avg"] == 14.0
+    assert diag_only["deltas_v2_vs_v1"] == {
+        "clarity_avg": 1.0,
+        "customer_fit_avg": 2.5,
+        "actionability_avg": 2.0,
+        "total_avg": 5.5,
+    }
+    assert len(diag_only["by_version_and_type"]) == 2
+
+    flow_empty = web_app_module.aggregate_rubric_metrics(records, content_type="flow_summary")
+    assert flow_empty["evaluated_count"] == 0
+    assert flow_empty["deltas_v2_vs_v1"] is None
+
+
+def test_extract_ticket_identifier() -> None:
+    """Valida extração de [TKT-XXX] e fallback para 'Personalizado'."""
+    assert (
+        web_app_module.extract_ticket_identifier("[TKT-102] Erro 504 no webhook de pagamentos")
+        == "TKT-102"
+    )
+    assert (
+        web_app_module.extract_ticket_identifier("Relato referenciando [TKT-999] no meio do texto")
+        == "TKT-999"
+    )
+    assert (
+        web_app_module.extract_ticket_identifier("Cliente relata lentidão ao gerar relatório")
+        == "Personalizado"
+    )
+
+
+def test_build_ticket_analytics_rows_and_fallback() -> None:
+    """Valida cruzamento ExecutionRecord x CustomerProfile, rubrica e fallback desconhecido."""
+    profiles = web_app_module.load_profiles_data()
+    long_ticket = "[TKT-101] " + ("Descrição longa de teste " * 5)
+
+    rec_evaluated = _make_record("k_eval", "v2", "diagnosis", scores=(4, 5, 5)).model_copy(
+        update={"customer_id": "cust_001", "ticket": long_ticket}
+    )
+    rec_unevaluated = _make_record("k_uneval", "v1", "resolution", scores=None).model_copy(
+        update={"customer_id": "cust_antigo_999", "ticket": "Relato livre sem código"}
+    )
+
+    rows = web_app_module.build_ticket_analytics_rows(
+        [rec_evaluated, rec_unevaluated],
+        profiles,
+    )
+    assert len(rows) == 2
+
+    row_eval = rows[0]
+    assert row_eval["ticket_id"] == "TKT-101"
+    assert len(row_eval["ticket_preview"]) == 65
+    assert row_eval["ticket_full"] == long_ticket
+    assert row_eval["customer_name"] == "Mariana Silva"
+    assert row_eval["technical_level"] == "leigo"
+    assert row_eval["communication_style"] == "didático"
+    assert row_eval["channel"] == "chat"
+    assert row_eval["is_evaluated"] is True
+    assert row_eval["clarity_score"] == 4
+    assert row_eval["customer_fit_score"] == 5
+    assert row_eval["actionability_score"] == 5
+    assert row_eval["total_score"] == 14
+
+    row_unknown = rows[1]
+    assert row_unknown["ticket_id"] == "Personalizado"
+    assert row_unknown["customer_name"] == "desconhecido"
+    assert row_unknown["technical_level"] == "desconhecido"
+    assert row_unknown["communication_style"] == "desconhecido"
+    assert row_unknown["channel"] == "desconhecido"
+    assert row_unknown["is_evaluated"] is False
+    assert row_unknown["clarity_score"] is None
+    assert row_unknown["total_score"] is None
+
+
+def test_summarize_by_ticket_grouping_and_averages() -> None:
+    """Valida agrupamento por ticket_id e médias separadas v1 vs v2."""
+    profiles = web_app_module.load_profiles_data()
+    records = [
+        _make_record("a1", "v1", "diagnosis", scores=(3, 2, 3)).model_copy(
+            update={"ticket": "[TKT-102] Timeout webhook"}
+        ),
+        _make_record("a2", "v2", "diagnosis", scores=(4, 5, 5)).model_copy(
+            update={"ticket": "[TKT-102] Timeout webhook"}
+        ),
+        _make_record("a3", "v2", "resolution", scores=(5, 5, 5)).model_copy(
+            update={"ticket": "[TKT-102] Timeout webhook"}
+        ),
+        _make_record("a4", "v1", "clarification", scores=None).model_copy(
+            update={"ticket": "Relato livre sem avaliação"}
+        ),
+    ]
+    rows = web_app_module.build_ticket_analytics_rows(records, profiles)
+    summary = web_app_module.summarize_by_ticket(rows)
+
+    by_id = {item["ticket_id"]: item for item in summary}
+    assert set(by_id.keys()) == {"TKT-102", "Personalizado"}
+
+    tkt_102 = by_id["TKT-102"]
+    assert tkt_102["total_executions"] == 3
+    assert tkt_102["evaluated_count"] == 3
+    # (8 + 14 + 15) / 3 = 12.33
+    assert tkt_102["avg_total_score"] == 12.33
+    assert tkt_102["v1_avg_total"] == 8.0
+    assert tkt_102["v2_avg_total"] == 14.5
+
+    custom = by_id["Personalizado"]
+    assert custom["total_executions"] == 1
+    assert custom["evaluated_count"] == 0
+    assert custom["avg_total_score"] is None
+    assert custom["v1_avg_total"] is None
+    assert custom["v2_avg_total"] is None
+
+
 def test_root_cli_shortcut_exists() -> None:
     """Confirma que o atalho cli.py existe na raiz e referencia src.cli.main."""
     root_cli = PROJECT_ROOT / "cli.py"
@@ -314,6 +553,26 @@ def _run_standalone() -> int:
                 (
                     "Helpers offline do Streamlit (geração, v1 vs v2, rubrica e histórico)",
                     lambda: test_web_app_helpers_offline(base_tmp / "web"),
+                ),
+                (
+                    "Agregação analítica da rubrica (vazio e sem avaliações)",
+                    test_aggregate_rubric_metrics_empty_and_unevaluated,
+                ),
+                (
+                    "Agregação analítica da rubrica (médias, deltas v2 vs v1 e filtro)",
+                    test_aggregate_rubric_metrics_averages_deltas_and_filter,
+                ),
+                (
+                    "Extração de identificador de ticket (TKT-XXX e Personalizado)",
+                    test_extract_ticket_identifier,
+                ),
+                (
+                    "Cruzamento analítico ExecutionRecord x CustomerProfile",
+                    test_build_ticket_analytics_rows_and_fallback,
+                ),
+                (
+                    "Resumo agrupado por ticket (v1 vs v2)",
+                    test_summarize_by_ticket_grouping_and_averages,
                 ),
                 (
                     "Atalho cli.py na raiz do projeto",
