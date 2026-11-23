@@ -1,0 +1,28 @@
+[
+  {
+    "timestamp": "2026-11-23T02:48:55.501073+00:00",
+    "cache_key": "a19ee6b87fc5c369161193c0e98324ebb0f88ed24c98b74aaa2f13842ef4dbe9",
+    "customer_id": "cust_002",
+    "ticket": "[TKT-101] Falha ao exportar relatório mensal de vendas em CSV: Ao tentar exportar o relatório consolidado de vendas dos últimos 90 dias no painel financeiro, a tela carrega por cerca de 40 segundos e exibe a mensagem genérica 'Não foi possível gerar o arquivo. Tente novamente'. Relatórios de apenas 7 dias funcionam normalmente. O problema começou após o fechamento de mês ontem à noite.",
+    "prompt_version": "v2",
+    "content_type": "flow_summary",
+    "provider": "google",
+    "model": "gemini-3.5-flash-lite",
+    "temperature": 0.2,
+    "output": "```text\n[Início do Fluxo: Triagem TKT-101]\n                  |\n                  v\n[Validar Escopo do Relatório]\n                  |\n         +--------+--------+\n         | Relatório > 7d? |\n         +--------+--------+\n                  |\n       +----------+----------+\n       | [SIM]               | [NÃO]\n       v                     v\n[Identificar Sintoma]   [Relatórios Curtos OK]\n(Timeout > 40s)         (Causa isolada em alta volumetria)\n       |                     |\n       +----------+----------+\n                  |\n                  v\n[Formular Hipótese de Causa Raiz]\n(Estouro de timeout na query por volumetria dos 90 dias após fechamento)\n                  |\n                  v\n[Executar Verificação Inicial]\n(Orientar Carlos Eduardo a testar filtros parciais ou exportação em lotes menores)\n                  |\n                  v\n[O Teste Parcial Funciona?]\n                  |\n         +--------+--------+\n         |                 |\n         v                 v\n      [SIM]              [NÃO]\n         |                 |\n         v                 v\n[Isolado por Timeout]   [Hipótese Alternativa]\n(Volume excessivo)      (Possível falha de permissão ou infra)\n         |                 |\n         v                 v\n[Orientação Acionável]  [Escalar para N2]\n(Agendar exportação     (Análise de logs de banco\n fora do horário pico)   e limite de memória)\n         |                 |\n         +--------+--------+\n                  |\n                  v\n[Fim do Fluxo: Resposta por E-mail Pronta]\n```",
+    "evaluation": {
+      "clarity": {
+        "score": 5,
+        "justification": "Fluxograma ASCII limpo, bem alinhado com caracteres de caixa e ramificações explícitas [SIM] e [NÃO], preservando indentação exata no JSON."
+      },
+      "customer_fit": {
+        "score": 4,
+        "justification": "Equilibra termos funcionais e contexto detalhado adequados ao perfil intermediário, servindo como referência clara de triagem."
+      },
+      "actionability": {
+        "score": 5,
+        "justification": "Conduz o atendente ponta a ponta desde a verificação do intervalo de 90 dias até a resolução paliativa ou escalonamento estruturado para N2."
+      }
+    }
+  }
+]

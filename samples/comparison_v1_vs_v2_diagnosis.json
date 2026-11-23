@@ -1,0 +1,54 @@
+[
+  {
+    "timestamp": "2026-11-23T02:48:48.506432+00:00",
+    "cache_key": "a79b74863e04b2dc4f417efda11779c85bbb7630161d0659d5f31b3918b59a8e",
+    "customer_id": "cust_001",
+    "ticket": "[TKT-102] Erro 504 Gateway Timeout no webhook de confirmação de pagamentos: Nosso endpoint de webhook (/api/v2/webhooks/payments) começou a receber respostas HTTP 504 intermitentes durante picos de checkout entre 18h e 21h. Os pedidos ficam presos com status 'aguardando pagamento' mesmo após a aprovação no gateway. Nos logs da nossa aplicação, o processamento síncrono do payload está levando entre 28s e 35s antes de retornar 200 OK.",
+    "prompt_version": "v1",
+    "content_type": "diagnosis",
+    "provider": "google",
+    "model": "gemini-3.5-flash-lite",
+    "temperature": 0.2,
+    "output": "Hipóteses\n- O endpoint de webhook (`/api/v2/webhooks/payments`) está demorando muito tempo para processar as requisições (entre 28s e 35s), o que causa o estouro do tempo limite (timeout) do gateway, gerando o Erro 504.\n- Os picos de tráfego entre 18h e 21h no checkout agravam a lentidão do processamento síncrono, resultando em respostas intermitentes de timeout e deixando os pedidos presos com o status 'aguardando pagamento' mesmo após a aprovação no gateway.\n\nEvidências Disponíveis\n- O erro relatado é um HTTP 504 Gateway Timeout ocorrendo no endpoint `/api/v2/webhooks/payments`.\n- As falhas são intermitentes e acontecem durante os picos de checkout, especificamente entre 18h e 21h.\n- Os pedidos ficam com o status 'aguardando pagamento' após a aprovação no gateway.\n- Os logs da aplicação mostram que o processamento síncrono do payload leva entre 28s e 35s antes de retornar 200 OK.\n\nDados Faltantes\n- Qual é o limite de tempo configurado (timeout) no gateway ou no servidor para a resposta do webhook.\n- Quais operações específicas estão sendo executadas durante o processamento síncrono do payload que consomem de 28s a 35s.\n- Informações sobre o uso de recursos (CPU, memória, banco de dados) da aplicação durante a janela de pico (18h às 21h).\n\nConclusão Provável\nO Erro 504 Gateway Timeout ocorre porque o tempo de processamento síncrono da aplicação (28s a 35s) excede o limite tolerado pelo gateway ou pelo servidor para a resposta da requisição. Esse problema é intensificado durante os picos de checkout (18h às 21h), impedindo a conclusão bem-sucedida da comunicação do webhook e deixando os pedidos presos com o status 'aguardando pagamento' mesmo após a aprovação no gateway.",
+    "evaluation": {
+      "clarity": {
+        "score": 3,
+        "justification": "Estrutura as 4 seções solicitadas, porém mantém tom genérico e não prioriza explicitamente hipóteses nem indica nível de confiança."
+      },
+      "customer_fit": {
+        "score": 2,
+        "justification": "Usa jargões técnicos sem tradução (webhook, payload síncrono, HTTP 504) e blocos extensos inadequados para cliente leigo em atendimento por chat."
+      },
+      "actionability": {
+        "score": 3,
+        "justification": "Aponta o gargalo geral de tempo de resposta, mas deixa a próxima validação pouco objetiva para o atendente conduzir com o cliente."
+      }
+    }
+  },
+  {
+    "timestamp": "2026-11-23T02:48:50.313391+00:00",
+    "cache_key": "235dd826192d37f5a04d869f4709b4bc9234305ed175f9fc844c3b8bc750f834",
+    "customer_id": "cust_001",
+    "ticket": "[TKT-102] Erro 504 Gateway Timeout no webhook de confirmação de pagamentos: Nosso endpoint de webhook (/api/v2/webhooks/payments) começou a receber respostas HTTP 504 intermitentes durante picos de checkout entre 18h e 21h. Os pedidos ficam presos com status 'aguardando pagamento' mesmo após a aprovação no gateway. Nos logs da nossa aplicação, o processamento síncrono do payload está levando entre 28s e 35s antes de retornar 200 OK.",
+    "prompt_version": "v2",
+    "content_type": "diagnosis",
+    "provider": "google",
+    "model": "gemini-3.5-flash-lite",
+    "temperature": 0.2,
+    "output": "1. ## Hipóteses — Liste de 2 a 4 hipóteses ordenadas da mais provável para a menos provável, conectando cada uma aos sintomas relatados.\n- **Demora no sistema (Tempo limite excedido):** O seu sistema demora mais de meio minuto para responder aos avisos de pagamento durante o horário de pico (entre 18h e 21h), fazendo a conexão cair e deixando a compra travada.\n- **Grande volume de acessos:** O sistema do seu site recebe muitas compras ao mesmo tempo à noites, ficando sobrecarregado e sem conseguir processar tudo a tempo.\n\n2. ## Evidências Disponíveis — Liste em tópicos apenas fatos explícitos extraídos do ticket.\n- O endereço digital usado para receber os avisos de pagamento (`/api/v2/webhooks/payments`) está apresentando falhas de tempo esgotado (erro 504).\n- O problema acontece de forma intermitente, especificamente nos horários de pico, entre 18h e 21h.\n- Os pedidos ficam presos com o status \"aguardando pagamento\", mesmo após a aprovação no gateway.\n- Os registros do sistema mostram que o processamento de cada mensagem de pagamento está levando entre 28 e 35 segundos antes de responder.\n\n3. ## Dados Faltantes — Liste as lacunas objetivas que impedem confirmar a causa raiz com certeza.\n- Capacidade atual de atendimento simultâneo do servidor ou da aplicação que processa os pagamentos.\n- Detalhes sobre quais tarefas específicas o sistema executa nesses 28 a 35 segundos de processamento.\n- Informações sobre o limite máximo de tempo configurado para a conexão aguardar uma resposta antes de expirar.\n\n4. ## Conclusão Provável — Sintetize em 2 a 4 linhas a causa mais provável, o nível de confiança (baixo/médio/alto) e a primeira validação recomendada.\nA causa mais provável é que o sistema demora muito tempo para concluir o recebimento do pagamento (quase 35 segundos), ultrapassando o limite de espera da conexão. O nível de confiança é alto. A primeira recomendação é verificar o que faz o sistema demorar tanto para responder aos avisos nesse horário de pico.",
+    "evaluation": {
+      "clarity": {
+        "score": 4,
+        "justification": "Separa rigorosamente hipóteses priorizadas, evidências do relato, dados faltantes e conclusão com nível de confiança explícito (alto); descontou-se 1 ponto porque o modelo ecoou parte da instrução descritiva nos títulos das seções (achado documentado para futura v3)."
+      },
+      "customer_fit": {
+        "score": 5,
+        "justification": "Traduz termos técnicos para linguagem acessível e didática ('endereço digital', 'tempo esgotado', 'mais de meio minuto'), em blocos curtos e escaneáveis calibrados ao perfil leigo no canal chat."
+      },
+      "actionability": {
+        "score": 5,
+        "justification": "Explicita o nível de confiança (alto), lista lacunas objetivas e define a primeira validação recomendada sem exigir conhecimento técnico avançado."
+      }
+    }
+  }
+]

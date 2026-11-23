@@ -1,0 +1,28 @@
+[
+  {
+    "timestamp": "2026-11-23T02:48:52.334709+00:00",
+    "cache_key": "0001cbd21a3c0df3b9ab1aaac015e77f56a7576de318f5810245d56d754effe1",
+    "customer_id": "cust_003",
+    "ticket": "[TKT-103] Erro de autenticação e permissão na sincronização de estoque com ERP: A integração automática de estoque entre o ERP e a loja virtual parou de atualizar o saldo de produtos desde hoje às 08h. O log do conector registra falhas HTTP 403 Forbidden no endpoint /v1/inventory/sync. A equipe trocou a chave de API ontem à tarde por política de rotação de credenciais, mas afirma ter atualizado o token no painel do ERP.",
+    "prompt_version": "v2",
+    "content_type": "resolution",
+    "provider": "google",
+    "model": "gemini-3.5-flash-lite",
+    "temperature": 0.2,
+    "output": "1. Validar a propagação da nova chave de API no ERP e na camada de gateway. A falha `HTTP 403 Forbidden` no endpoint `/v1/inventory/sync` indica rejeição de credenciais.\n   - Ação: Confirme se o token atualizado no ERP não possui espaços residuais e se o header de autorização (`Authorization: Bearer <token>`) está sendo injetado corretamente na requisição.\n   - Sucesso: A próxima chamada retornar status HTTP diferente de 403 (esperado 200 OK ou 401 Unauthorized se o token for inválido).\n\n2. Verificar os escopos e permissões da nova chave de API gerada no painel da loja virtual.\n   - Ação: Acesse a gestão de credenciais e valide se a chave possui permissão explícita de escrita e leitura para o escopo de inventário (`inventory:write` / `inventory:read`).\n   - Sucesso: Permissões ativas e vinculadas ao endpoint `/v1/inventory/sync`.\n\n3. Forçar o reenvio de um payload de teste via CLI ou ferramenta de API (Postman/cURL) usando a credencial atualizada.\n   - Ação: Execute uma requisição POST manual isolando o ERP para testar a resposta do endpoint com o novo token.\n   - Sucesso: Resposta `200 OK` com o JSON de confirmação de sincronização do SKU testado.\n\nSe o problema persistir:\nColete o payload da requisição (mascare tokens e dados sensíveis), o *response body* completo do erro HTTP 403 e o timestamp exato da última tentativa antes de escalar para o N2.",
+    "evaluation": {
+      "clarity": {
+        "score": 5,
+        "justification": "Passo a passo numerado, direto e sem rodeios, com critério claro de validação em cada etapa e bloco objetivo de escalonamento para N2."
+      },
+      "customer_fit": {
+        "score": 5,
+        "justification": "Emprega terminologia técnica precisa (HTTP 403, escopos de token, rotação de credenciais, endpoint) em formato enxuto ideal para perfil avançado no chat."
+      },
+      "actionability": {
+        "score": 5,
+        "justification": "Cada passo traz ação executável, sinal esperado de sucesso e evidências exatas a coletar caso o erro 403 persista."
+      }
+    }
+  }
+]

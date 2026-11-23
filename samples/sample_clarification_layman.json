@@ -1,0 +1,28 @@
+[
+  {
+    "timestamp": "2026-11-23T02:48:53.558001+00:00",
+    "cache_key": "b8855741c89a0c3297418e687a99919ec7fc3c214215789c0b80f21650b96a72",
+    "customer_id": "cust_004",
+    "ticket": "[TKT-104] Lentidão extrema e travamento intermitente no sistema de caixa (PDV): Os dois terminais de frente de caixa da loja física estão travando por 15 a 20 segundos toda vez que o operador bipa um produto ou tenta finalizar uma venda no cartão. Em alguns momentos o aplicativo fecha sozinho sem salvar o cupom. O problema ocorre principalmente no horário de almoço, quando a rede Wi-Fi da loja também fica instável.",
+    "prompt_version": "v2",
+    "content_type": "clarification",
+    "provider": "google",
+    "model": "gemini-3.5-flash-lite",
+    "temperature": 0.2,
+    "output": "1. Fernanda, esses terminais de caixa estão ligados por cabo de rede direto na internet ou estão usando o Wi-Fi da loja?\n   - Por que destrava o diagnóstico: Confirma ou descarta se o problema de lentidão é causado pelo uso do Wi-Fi instável nos caixas ou se o computador usa cabo.\n\n2. Quando o programa do caixa fecha sozinho, aparece alguma mensagem na tela ou o sistema some do nada?\n   - Por que destrava o diagnóstico: Descarta ou confirma se o aplicativo está sofrendo uma falha grave por falta de memória ou se é apenas uma queda de conexão.\n\n3. O travamento acontece em qualquer cartão ou é só quando usam a maquininha integrada para pagamento?\n   - Por que destrava o diagnóstico: Ajuda a verificar se a lentidão na hora de vender no cartão vem do sistema do caixa ou da comunicação com a operadora do cartão.",
+    "evaluation": {
+      "clarity": {
+        "score": 5,
+        "justification": "Lista priorizada dentro do limite de 3 a 5 perguntas essenciais, sem repetir informações já presentes no relato do ticket."
+      },
+      "customer_fit": {
+        "score": 5,
+        "justification": "Frases curtas, diretas e naturais para fala em voz alta por telefone, sem jargões técnicos para um perfil leigo com pouco tempo."
+      },
+      "actionability": {
+        "score": 5,
+        "justification": "Explica objetivamente por que cada resposta destrava o diagnóstico entre falha de Wi-Fi local, terminal PDV ou instabilidade no aplicativo."
+      }
+    }
+  }
+]
